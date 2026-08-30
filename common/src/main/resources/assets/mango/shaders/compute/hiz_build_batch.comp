@@ -1,0 +1,160 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : enable
+
+
+#define BATCH_MIP_COUNT 4
+#define TILE_SIZE 8
+
+#define MIN_REDUCE_IDENTITY 1.0
+
+layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D srcImage;
+
+layout(set = 0, binding = 1, r16f) uniform writeonly image2D dstMip0;
+layout(set = 0, binding = 2, r16f) uniform writeonly image2D dstMip1;
+layout(set = 0, binding = 3, r16f) uniform writeonly image2D dstMip2;
+layout(set = 0, binding = 4, r16f) uniform writeonly image2D dstMip3;
+
+layout(set = 0, binding = 5, scalar) uniform BatchParams {
+    int levelCount;
+} params;
+
+shared float sharedDepth[TILE_SIZE * TILE_SIZE];
+
+ivec2 srcSize;
+ivec2 mip1Size;
+ivec2 mip2Size;
+ivec2 mip3Size;
+ivec2 mip4Size;
+
+ivec2 mipSize(int level) {
+    if (level <= 0) {
+        return srcSize;
+    }
+    if (level == 1) {
+        return mip1Size;
+    }
+    if (level == 2) {
+        return mip2Size;
+    }
+    if (level == 3) {
+        return mip3Size;
+    }
+    return mip4Size;
+}
+
+float roundDownToHalf(float v) {
+    uint bits = packHalf2x16(vec2(v, 0.0)) & 0xFFFFu;
+    float rounded = unpackHalf2x16(bits).x;
+    if (rounded > v) {
+        rounded = unpackHalf2x16(bits - 1u).x;
+    }
+    return rounded;
+}
+
+ivec2 partitionBegin(ivec2 coord, int level) {
+    return coord * mipSize(level - 1) / mipSize(level);
+}
+
+ivec2 partitionEnd(ivec2 coord, int level) {
+    return (coord + ivec2(1)) * mipSize(level - 1) / mipSize(level);
+}
+
+float reduceFromSource(ivec2 coord, int level) {
+    ivec2 begin = coord;
+    ivec2 end = coord + ivec2(1);
+    for (int current = level; current >= 1; current--) {
+        ivec2 previousSize = mipSize(current - 1);
+        ivec2 currentSize = mipSize(current);
+        begin = begin * previousSize / currentSize;
+        end = end * previousSize / currentSize;
+    }
+
+    float reduced = MIN_REDUCE_IDENTITY;
+    if (all(equal(end - begin, ivec2(2)))) {
+        vec4 quad = textureGather(srcImage, (vec2(begin) + 1.0) / vec2(srcSize), 0);
+        return min(reduced, min(min(quad.x, quad.y), min(quad.z, quad.w)));
+    }
+    for (int y = begin.y; y < end.y; y++) {
+        for (int x = begin.x; x < end.x; x++) {
+            reduced = min(reduced, texelFetch(srcImage, ivec2(x, y), 0).r);
+        }
+    }
+    return reduced;
+}
+
+float reduceShared(ivec2 coord, int level, int tileSide) {
+    ivec2 begin = partitionBegin(coord, level);
+    ivec2 end = partitionEnd(coord, level);
+
+    int previousTileSide = tileSide * 2;
+    ivec2 previousTileBase = ivec2(gl_WorkGroupID.xy) * previousTileSide;
+    ivec2 localBegin = begin - previousTileBase;
+    ivec2 localEnd = end - previousTileBase;
+
+    if (localEnd.x > previousTileSide || localEnd.y > previousTileSide) {
+        return reduceFromSource(coord, level);
+    }
+
+    float reduced = MIN_REDUCE_IDENTITY;
+    for (int y = localBegin.y; y < localEnd.y; y++) {
+        for (int x = localBegin.x; x < localEnd.x; x++) {
+            reduced = min(reduced, sharedDepth[y * TILE_SIZE + x]);
+        }
+    }
+    return reduced;
+}
+
+void storeMip(int level, ivec2 coord, float value) {
+    vec4 texel = vec4(value, 0.0, 0.0, 1.0);
+    if (level == 1) {
+        imageStore(dstMip0, coord, texel);
+    } else if (level == 2) {
+        imageStore(dstMip1, coord, texel);
+    } else if (level == 3) {
+        imageStore(dstMip2, coord, texel);
+    } else {
+        imageStore(dstMip3, coord, texel);
+    }
+}
+
+void main() {
+    srcSize = textureSize(srcImage, 0);
+    mip1Size = imageSize(dstMip0);
+    mip2Size = max(ivec2(1), mip1Size >> 1);
+    mip3Size = max(ivec2(1), mip2Size >> 1);
+    mip4Size = max(ivec2(1), mip3Size >> 1);
+    int lastLevel = min(params.levelCount, BATCH_MIP_COUNT);
+
+    ivec2 localId = ivec2(gl_LocalInvocationID.xy);
+    ivec2 firstCoord = ivec2(gl_WorkGroupID.xy) * TILE_SIZE + localId;
+
+    float value = MIN_REDUCE_IDENTITY;
+    if (all(lessThan(firstCoord, mip1Size))) {
+        value = roundDownToHalf(reduceFromSource(firstCoord, 1));
+        storeMip(1, firstCoord, value);
+    }
+    sharedDepth[gl_LocalInvocationIndex] = value;
+
+    for (int level = 2; level <= BATCH_MIP_COUNT; level++) {
+        int tileSide = TILE_SIZE >> (level - 1);
+        bool withinTile = localId.x < tileSide && localId.y < tileSide;
+        ivec2 coord = ivec2(gl_WorkGroupID.xy) * tileSide + localId;
+
+        barrier();
+
+        float levelValue = MIN_REDUCE_IDENTITY;
+        bool writes = level <= lastLevel && withinTile && all(lessThan(coord, mipSize(level)));
+        if (writes) {
+            levelValue = reduceShared(coord, level, tileSide);
+            storeMip(level, coord, levelValue);
+        }
+
+        barrier();
+
+        if (withinTile) {
+            sharedDepth[localId.y * TILE_SIZE + localId.x] = levelValue;
+        }
+    }
+}

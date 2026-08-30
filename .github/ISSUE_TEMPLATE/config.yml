@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions / Questions
+    url: https://github.com/TheFruitMC/Mango/discussions
+    about: For questions, ideas, and general discussion — please use Discussions instead of opening an issue.
+  - name: Mango Documentation
+    url: https://github.com/TheFruitMC/Mango#readme
+    about: Check the README for hardware requirements and setup instructions.

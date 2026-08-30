@@ -1,0 +1,118 @@
+name: Performance Issue
+description: Report frame-rate drops, stuttering, or high memory usage
+title: "[Perf] "
+labels: [ "performance" ]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Mango is a rendering optimization mod, so performance regressions are taken seriously.
+        Please provide concrete numbers (FPS, frame times) rather than subjective descriptions.
+        Compare against vanilla (no Mango) where possible.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Performance Problem
+      description: Describe the issue — low FPS, stuttering, frametime spikes, memory leaks, etc.
+    validations:
+      required: true
+
+  - type: input
+    id: mango-fps
+    attributes:
+      label: FPS with Mango
+      placeholder: "e.g. 45 avg, drops to 20"
+    validations:
+      required: true
+
+  - type: input
+    id: vanilla-fps
+    attributes:
+      label: FPS without Mango (vanilla baseline)
+      placeholder: "e.g. 120 avg"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scene
+    attributes:
+      label: Affected Scenario
+      options:
+        - General gameplay (exploration)
+        - Dense terrain / many chunks
+        - Lots of entities
+        - Translucent blocks (water, stained glass)
+        - Shader pack enabled (Iris)
+        - GUI / menus open
+        - Chunk loading / world generation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: loader
+    attributes:
+      label: Mod Loader
+      options:
+        - Fabric
+        - NeoForge
+        - Both / Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: minecraft-version
+    attributes:
+      label: Minecraft Version
+      placeholder: "26.2"
+    validations:
+      required: true
+
+  - type: input
+    id: mango-version
+    attributes:
+      label: Mango Version
+      placeholder: "26.0.1-alpha.1"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu-model
+    attributes:
+      label: GPU Model
+      placeholder: "e.g. RTX 4070, Radeon RX 7800 XT, Apple M3 Pro"
+    validations:
+      required: true
+
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU Model
+      placeholder: "e.g. Ryzen 7 7800X3D, Intel i7-14700K, Apple M3 Pro"
+
+  - type: input
+    id: ram
+    attributes:
+      label: RAM Allocated to Minecraft
+      placeholder: "e.g. 6 GB"
+
+  - type: textarea
+    id: profile-data
+    attributes:
+      label: Profiling / Debug Data
+      description: |
+        If possible, attach:
+        - F3 debug screen screenshot (shows FPS, chunk stats)
+        - Mango debug overlay output (if available)
+        - Any profiling data (sampler, spark report, etc.)
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have compared FPS with and without Mango under the same conditions
+          required: true
+        - label: I have verified my graphics drivers are up to date
+          required: true

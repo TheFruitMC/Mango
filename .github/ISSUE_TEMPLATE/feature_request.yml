@@ -1,0 +1,55 @@
+name: Feature Request
+description: Suggest a new rendering feature or enhancement for Mango
+title: "[Feature] "
+labels: [ "enhancement" ]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature!
+        Mango focuses on rendering pipeline modernization and performance. Keep that scope in mind.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Motivation
+      description: What problem does this solve, or what limitation are you hitting?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the feature you'd like and how it should work.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any workarounds or alternative approaches you've thought about.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected Area
+      options:
+        - Terrain / chunk rendering
+        - Entity rendering
+        - Translucent rendering
+        - Frame generation
+        - GUI / configuration
+        - API / integration
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have searched existing issues to avoid duplicates
+          required: true

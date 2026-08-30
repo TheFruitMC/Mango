@@ -1,0 +1,226 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, scalar) uniform CameraBlock {
+    mat4 currentViewProjection;
+    mat4 historyViewProjection;
+    ivec4 currentCameraBlock;
+    ivec4 historyCameraBlock;
+    vec4 currentCameraOffset;
+    vec4 historyCameraOffset;
+    ivec2 screenDim;
+    int maxMipLevel;
+    float depthBias;
+    float relativeDepthBias;
+    float screenMargin;
+    float hysteresisBias;
+    int mipRefineSteps;
+    int relaxOffscreenHistory;
+} camera;
+
+layout(set = 0, binding = 1, scalar) readonly buffer SectionTable {
+    ivec4 sections[];
+} sectionTable;
+
+layout(set = 0, binding = 2) uniform sampler2D hizPyramid;
+
+layout(set = 0, binding = 3, scalar) buffer IndirectCommands {
+    uint commands[];
+} cmdBuffer;
+
+layout(set = 0, binding = 4, scalar) readonly buffer PreviousVisibility {
+    uint visibility[];
+} prevVisibility;
+
+layout(set = 0, binding = 5, scalar) buffer CurrentVisibility {
+    uint visibility[];
+} currentVisibility;
+
+layout(set = 0, binding = 6, scalar) uniform DispatchParams {
+    uint commandCount;
+    uint sectionCount;
+} dispatch;
+
+const float SECTION_SIZE = 16.0;
+const float FAR_DEPTH = 0.0;
+const float NEAR_DEPTH = 1.0;
+const int MAX_FOOTPRINT_SPAN = 9;
+const uint INDIRECT_COMMAND_UINTS = 5u;
+
+vec2 ndcToScreen(vec2 ndc) {
+    return (ndc * 0.5 + 0.5) * vec2(camera.screenDim);
+}
+
+struct ScreenBox {
+    vec2 boxMin;
+    vec2 boxMax;
+    float minDepth;
+    float maxDepth;
+    bool anyFront;
+    bool allFront;
+};
+
+void addCorner(inout ScreenBox box, vec4 clip) {
+    if (clip.w <= 0.0) {
+        box.allFront = false;
+        return;
+    }
+    box.anyFront = true;
+    vec3 ndc = clip.xyz / clip.w;
+    vec2 screen = ndcToScreen(ndc.xy);
+    box.boxMin = min(box.boxMin, screen);
+    box.boxMax = max(box.boxMax, screen);
+    box.minDepth = min(box.minDepth, ndc.z);
+    box.maxDepth = max(box.maxDepth, ndc.z);
+}
+
+ScreenBox projectBox(vec3 origin, mat4 viewProjection, ivec3 cameraBlock, vec3 cameraOffset) {
+    vec3 base = origin - vec3(cameraBlock) + cameraOffset;
+    vec4 dx = viewProjection[0] * SECTION_SIZE;
+    vec4 dy = viewProjection[1] * SECTION_SIZE;
+    vec4 dz = viewProjection[2] * SECTION_SIZE;
+
+    vec4 c00 = viewProjection * vec4(base, 1.0);
+    vec4 c10 = c00 + dx;
+    vec4 c01 = c00 + dy;
+    vec4 c11 = c10 + dy;
+
+    ScreenBox box;
+    box.boxMin = vec2(camera.screenDim);
+    box.boxMax = vec2(0.0);
+    box.minDepth = NEAR_DEPTH;
+    box.maxDepth = FAR_DEPTH;
+    box.anyFront = false;
+    box.allFront = true;
+
+    addCorner(box, c00);
+    addCorner(box, c10);
+    addCorner(box, c01);
+    addCorner(box, c11);
+    addCorner(box, c00 + dz);
+    addCorner(box, c10 + dz);
+    addCorner(box, c01 + dz);
+    addCorner(box, c11 + dz);
+    return box;
+}
+
+int ceilLog2(int n) {
+    return n <= 1 ? 0 : findMSB(n - 1) + 1;
+}
+
+void markVisible(uint commandOffset, uint sectionIndex) {
+    cmdBuffer.commands[commandOffset + 1u] = 1u;
+    atomicOr(currentVisibility.visibility[sectionIndex], 1u);
+}
+
+void main() {
+    uint commandIndex = gl_GlobalInvocationID.x;
+    uint commandOffset = commandIndex * INDIRECT_COMMAND_UINTS;
+    if (commandOffset + INDIRECT_COMMAND_UINTS - 1u >= dispatch.commandCount) {
+        return;
+    }
+
+    uint sectionIndex = cmdBuffer.commands[commandOffset + 4u];
+    if (sectionIndex >= dispatch.sectionCount) {
+        return;
+    }
+
+    vec3 origin = vec3(sectionTable.sections[sectionIndex].xyz);
+
+    ScreenBox current = projectBox(
+        origin,
+        camera.currentViewProjection,
+        camera.currentCameraBlock.xyz,
+        camera.currentCameraOffset.xyz
+    );
+
+    if (!current.anyFront) {
+        cmdBuffer.commands[commandOffset + 1u] = 0u;
+        return;
+    }
+    if (!current.allFront) {
+        markVisible(commandOffset, sectionIndex);
+        return;
+    }
+    if (current.boxMax.x < 0.0 || current.boxMin.x >= camera.screenDim.x
+        || current.boxMax.y < 0.0 || current.boxMin.y >= camera.screenDim.y
+        || current.maxDepth < FAR_DEPTH || current.minDepth > NEAR_DEPTH) {
+        cmdBuffer.commands[commandOffset + 1u] = 0u;
+        return;
+    }
+
+    ScreenBox history = projectBox(
+        origin,
+        camera.historyViewProjection,
+        camera.historyCameraBlock.xyz,
+        camera.historyCameraOffset.xyz
+    );
+
+    if (!history.allFront || history.minDepth < FAR_DEPTH || history.maxDepth > NEAR_DEPTH) {
+        markVisible(commandOffset, sectionIndex);
+        return;
+    }
+
+    float objectDepth = history.maxDepth;
+
+    vec2 lastPixel = vec2(camera.screenDim - ivec2(1));
+    vec2 historySampleMin = history.boxMin - vec2(camera.screenMargin);
+    vec2 historySampleMax = history.boxMax + vec2(camera.screenMargin);
+    bool historyInsideScreen = historySampleMin.x >= 0.0 && historySampleMin.y >= 0.0
+        && historySampleMax.x <= lastPixel.x && historySampleMax.y <= lastPixel.y;
+    bool historyTouchesScreen = historySampleMax.x >= 0.0 && historySampleMax.y >= 0.0
+        && historySampleMin.x <= lastPixel.x && historySampleMin.y <= lastPixel.y;
+    bool historyUsable = camera.relaxOffscreenHistory != 0 ? historyTouchesScreen : historyInsideScreen;
+    if (!historyUsable) {
+        markVisible(commandOffset, sectionIndex);
+        return;
+    }
+
+    vec2 sampleMin = max(min(current.boxMin, history.boxMin) - vec2(camera.screenMargin), vec2(0.0));
+    vec2 sampleMax = min(max(current.boxMax, history.boxMax) + vec2(camera.screenMargin), lastPixel);
+
+    ivec2 mip0Dim = textureSize(hizPyramid, 0);
+    vec2 pixelToTexel = vec2(mip0Dim) / vec2(camera.screenDim);
+    vec2 texelMin = sampleMin * pixelToTexel;
+    vec2 texelMax = sampleMax * pixelToTexel;
+
+    ivec2 texel0Min = ivec2(floor(texelMin));
+    ivec2 texel0Max = ivec2(floor(texelMax));
+    int span0 = max(texel0Max.x - texel0Min.x, texel0Max.y - texel0Min.y) + 1;
+    int mipLevel = clamp(ceilLog2(span0) - camera.mipRefineSteps, 0, camera.maxMipLevel);
+
+    ivec2 minTexel;
+    ivec2 maxTexel;
+    ivec2 textureDim;
+    for (;;) {
+        textureDim = max(ivec2(1), mip0Dim >> mipLevel);
+        minTexel = clamp(texel0Min >> mipLevel, ivec2(0), textureDim - ivec2(1));
+        maxTexel = clamp(texel0Max >> mipLevel, ivec2(0), textureDim - ivec2(1));
+        ivec2 span = maxTexel - minTexel + ivec2(1);
+        if (mipLevel >= camera.maxMipLevel || max(span.x, span.y) <= MAX_FOOTPRINT_SPAN) {
+            break;
+        }
+        mipLevel++;
+    }
+
+    float coveredDepth = NEAR_DEPTH;
+    for (int y = minTexel.y; y <= maxTexel.y; y++) {
+        for (int x = minTexel.x; x <= maxTexel.x; x++) {
+            coveredDepth = min(coveredDepth, texelFetch(hizPyramid, ivec2(x, y), mipLevel).r);
+        }
+    }
+
+    float relative = camera.relativeDepthBias;
+    if (prevVisibility.visibility[sectionIndex] != 0u) {
+        relative += camera.hysteresisBias;
+    }
+    float bias = camera.depthBias + relative * coveredDepth;
+    bool occluded = objectDepth < coveredDepth - bias;
+    if (occluded) {
+        cmdBuffer.commands[commandOffset + 1u] = 0u;
+    } else {
+        markVisible(commandOffset, sectionIndex);
+    }
+}

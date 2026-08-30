@@ -1,0 +1,92 @@
+name: Bug Report
+description: Report a crash, rendering artifact, or incorrect behavior in Mango
+title: "[Bug] "
+labels: [ "bug" ]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug in Mango.
+        Please fill out every field below — incomplete reports are harder to diagnose.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what went wrong. What did you expect to happen, and what actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction Steps
+      description: Minimal steps to reproduce the issue.
+      placeholder: |
+        1. Launch Minecraft with Mango
+        2. ...
+        3. Observe the issue
+    validations:
+      required: true
+
+  - type: dropdown
+    id: loader
+    attributes:
+      label: Mod Loader
+      options:
+        - Fabric
+        - NeoForge
+        - Both / Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Issue Category
+      options:
+        - Crash
+        - Rendering artifact (visual glitch)
+        - Texture / model issue
+        - GUI issue
+        - Performance regression
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log Files
+      description: |
+        Paste the relevant log output, or drag the log file here.
+        - Latest log: `logs/latest.log`
+        - Crash report: `crash-reports/`
+        Include the **full** stack trace if there is a crash.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / Videos
+      description: Attach screenshots or a short video clip showing the issue. Very helpful for rendering artifacts.
+
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other Mods Installed
+      description: List other mods (especially rendering-related ones like Iris, Oculus, etc.) if applicable.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have updated my graphics drivers to the latest version
+          required: true
+        - label: I am running a supported Minecraft version (26.2)
+          required: true
+        - label: I have searched existing issues to avoid duplicates
+          required: true

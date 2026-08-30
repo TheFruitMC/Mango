@@ -1,0 +1,35 @@
+#version 460
+#extension GL_EXT_scalar_block_layout : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, r16f) readonly uniform image2D srcDepth;
+layout(set = 0, binding = 1, r16f) uniform image2D dstDepth;
+
+
+void main() {
+    ivec2 srcSize = imageSize(srcDepth);
+    ivec2 dstSize = max(ivec2(1), srcSize >> 1);
+
+    ivec2 dstCoord = ivec2(gl_GlobalInvocationID.xy);
+    if (dstCoord.x >= dstSize.x || dstCoord.y >= dstSize.y) {
+        return;
+    }
+
+    ivec2 srcBegin = dstCoord * 2;
+    ivec2 srcEnd = srcBegin + ivec2(2);
+    if (dstCoord.x == dstSize.x - 1) {
+        srcEnd.x = srcSize.x;
+    }
+    if (dstCoord.y == dstSize.y - 1) {
+        srcEnd.y = srcSize.y;
+    }
+
+    float minDepth = 1.0;
+    for (int y = srcBegin.y; y < srcEnd.y; y++) {
+        for (int x = srcBegin.x; x < srcEnd.x; x++) {
+            minDepth = min(minDepth, imageLoad(srcDepth, ivec2(x, y)).r);
+        }
+    }
+    imageStore(dstDepth, dstCoord, vec4(minDepth, 0.0, 0.0, 1.0));
+}

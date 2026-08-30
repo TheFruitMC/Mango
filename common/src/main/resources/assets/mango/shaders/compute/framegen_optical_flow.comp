@@ -1,0 +1,118 @@
+// Copyright (c) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
+//
+// Derived from AMD FidelityFX SDK Frame Interpolation component (optical flow via depth reprojection)
+// https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D handDepth;
+layout(set = 0, binding = 1) uniform sampler2D prevColor;
+layout(set = 0, binding = 2) uniform sampler2D currColor;
+layout(set = 0, binding = 3, rg16f) uniform writeonly image2D motionVectors;
+
+layout(set = 0, binding = 4, std140) uniform Params {
+    vec2 texelSize;
+    vec2 screenSize;
+    mat4 prevClipFromCurrentClip;
+    mat4 prevClipFromCurrentClipRot;
+} params;
+
+layout(set = 0, binding = 5) uniform sampler2D worldDepth;
+
+const float SKY_DEPTH = 0.0;
+const float MIN_W = 1.0e-6;
+const float HAND_DEPTH_THRESHOLD = 0.05;
+const int SEARCH_RADIUS = 1;
+const float RESIDUAL_SEARCH_THRESHOLD = 0.25;
+const float LOCAL_MOTION_SQ = 16.0;
+
+vec2 reproject(mat4 clipFromCurrentClip, float depth, vec2 uv, vec2 screenSize) {
+    vec4 currentClip = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 previousClip = clipFromCurrentClip * currentClip;
+    if (isnan(previousClip.w) || isinf(previousClip.w) || abs(previousClip.w) < MIN_W) {
+        return vec2(0.0);
+    }
+    vec2 previousUv = previousClip.xy / previousClip.w * 0.5 + 0.5;
+    vec2 motion = (uv - previousUv) * screenSize;
+    if (any(isnan(motion)) || any(isinf(motion))) {
+        return vec2(0.0);
+    }
+    return clamp(motion, -screenSize, screenSize);
+}
+
+void main() {
+    ivec2 halfPixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 depthSize = textureSize(worldDepth, 0);
+    ivec2 pixel = halfPixel * 2;
+    if (pixel.x >= depthSize.x || pixel.y >= depthSize.y) return;
+
+    float handDepthVal = texelFetch(handDepth, pixel, 0).r;
+    float worldDepthVal = texelFetch(worldDepth, pixel, 0).r;
+
+    vec2 uv = (vec2(pixel) + 0.5) * params.texelSize;
+
+    vec2 cameraMotion = vec2(0.0);
+    if (handDepthVal > 0.0) {
+        cameraMotion = reproject(params.prevClipFromCurrentClipRot, handDepthVal, uv, params.screenSize);
+    } else if (worldDepthVal <= SKY_DEPTH) {
+        cameraMotion = reproject(params.prevClipFromCurrentClipRot, worldDepthVal, uv, params.screenSize);
+    } else if (worldDepthVal >= HAND_DEPTH_THRESHOLD) {
+        cameraMotion = reproject(params.prevClipFromCurrentClip, worldDepthVal, uv, params.screenSize);
+    }
+
+    vec3 currentColor = texelFetch(currColor, pixel, 0).rgb;
+    ivec2 prevPx = clamp(ivec2(round(vec2(pixel) - cameraMotion)), ivec2(0), depthSize - 1);
+    vec3 prevC = texelFetch(prevColor, prevPx, 0).rgb;
+    float baseSAD = dot(abs(currentColor - prevC), vec3(1.0));
+
+    vec2 motion = cameraMotion;
+
+    ivec2 residual = ivec2(0);
+    bool residualFound = false;
+    if (dot(cameraMotion, cameraMotion) < LOCAL_MOTION_SQ && baseSAD > RESIDUAL_SEARCH_THRESHOLD) {
+        for (int dy = -SEARCH_RADIUS; dy <= SEARCH_RADIUS; dy++) {
+            for (int dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                ivec2 samplePx = clamp(prevPx + ivec2(dx, dy), ivec2(0), depthSize - 1);
+                vec3 sampleColor = texelFetch(prevColor, samplePx, 0).rgb;
+                float sad = dot(abs(currentColor - sampleColor), vec3(1.0));
+                if (sad < baseSAD) {
+                    baseSAD = sad;
+                    residual = samplePx - prevPx;
+                    residualFound = true;
+                }
+            }
+        }
+        if (residualFound) {
+            motion = vec2(pixel) - vec2(prevPx + residual);
+        }
+    }
+
+    motion = clamp(motion, -params.screenSize, params.screenSize);
+
+    if (any(isnan(motion)) || any(isinf(motion))) {
+        motion = vec2(0.0);
+    }
+
+    imageStore(motionVectors, halfPixel, vec4(motion, 0.0, 0.0));
+}

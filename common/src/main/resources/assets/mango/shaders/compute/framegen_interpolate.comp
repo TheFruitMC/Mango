@@ -1,0 +1,150 @@
+// Copyright (c) 2022-2026 Advanced Micro Devices, Inc. All rights reserved.
+//
+// Derived from AMD FidelityFX SDK Frame Interpolation component (disocclusion-aware frame interpolation)
+// https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D prevFrame;
+layout(set = 0, binding = 1) uniform sampler2D currFrame;
+layout(set = 0, binding = 2) uniform sampler2D motionVectors;
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D outputFrame;
+
+layout(set = 0, binding = 4, std140) uniform Params {
+    vec2 texelSize;
+    float disocclusionThreshold;
+    float phase;
+} params;
+
+layout(set = 0, binding = 5) uniform sampler2D worldDepth;
+
+const float STATIC_MOTION_SQ = 0.25;
+const float DEPTH_DISOCCLUSION = 0.2;
+const float REACTIVE_DEPTH_STABILITY = 0.8;
+const float REACTIVE_CONFIDENCE_ATTENUATION = 0.6;
+const float REACTIVE_MAX_MOTION_PX = 4.0;
+const float FULL_INTERPOLATION_CONFIDENCE = 1.0;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 texSize = textureSize(currFrame, 0);
+    if (pixel.x >= texSize.x || pixel.y >= texSize.y) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) * params.texelSize;
+    vec3 centerColor = texelFetch(currFrame, pixel, 0).rgb;
+
+    float centerDepth = texelFetch(worldDepth, pixel, 0).r;
+
+    ivec2 motionSize = textureSize(motionVectors, 0);
+    ivec2 halfPixel = ivec2(pixel.xy / 2);
+    halfPixel = clamp(halfPixel, ivec2(0), motionSize - 1);
+    ivec2 hp1 = min(halfPixel + ivec2(1, 0), motionSize - 1);
+    ivec2 hp2 = min(halfPixel + ivec2(0, 1), motionSize - 1);
+    ivec2 hp3 = min(halfPixel + ivec2(1, 1), motionSize - 1);
+
+    vec2 mv00 = texelFetch(motionVectors, halfPixel, 0).xy;
+    vec2 mv10 = texelFetch(motionVectors, hp1, 0).xy;
+    vec2 mv01 = texelFetch(motionVectors, hp2, 0).xy;
+    vec2 mv11 = texelFetch(motionVectors, hp3, 0).xy;
+
+    ivec2 depthSize = textureSize(worldDepth, 0);
+    ivec2 ref00 = clamp(halfPixel * 2, ivec2(0), depthSize - 1);
+    ivec2 ref10 = clamp(halfPixel * 2 + ivec2(2, 0), ivec2(0), depthSize - 1);
+    ivec2 ref01 = clamp(halfPixel * 2 + ivec2(0, 2), ivec2(0), depthSize - 1);
+    ivec2 ref11 = clamp(halfPixel * 2 + ivec2(2, 2), ivec2(0), depthSize - 1);
+
+    float d00 = texelFetch(worldDepth, ref00, 0).r;
+    float d10 = texelFetch(worldDepth, ref10, 0).r;
+    float d01 = texelFetch(worldDepth, ref01, 0).r;
+    float d11 = texelFetch(worldDepth, ref11, 0).r;
+
+    float diff00 = abs(d00 - centerDepth);
+    float diff10 = abs(d10 - centerDepth);
+    float diff01 = abs(d01 - centerDepth);
+    float diff11 = abs(d11 - centerDepth);
+
+    vec2 mvPixels = mv00;
+    float minDiff = diff00;
+    if (diff10 < minDiff) { minDiff = diff10; mvPixels = mv10; }
+    if (diff01 < minDiff) { minDiff = diff01; mvPixels = mv01; }
+    if (diff11 < minDiff) { minDiff = diff11; mvPixels = mv11; }
+
+    if (any(isnan(mvPixels)) || any(isinf(mvPixels))) {
+        imageStore(outputFrame, pixel, vec4(centerColor, 1.0));
+        return;
+    }
+
+    if (dot(mvPixels, mvPixels) < STATIC_MOTION_SQ) {
+        vec3 staticPrev = textureLod(prevFrame, uv, 0.0).rgb;
+        vec3 staticCurr = textureLod(currFrame, uv, 0.0).rgb;
+        vec3 staticBlend = mix(staticPrev, staticCurr, params.phase);
+        imageStore(outputFrame, pixel, vec4(clamp(staticBlend, vec3(0.0), vec3(1.0)), 1.0));
+        return;
+    }
+
+    vec2 mv = mvPixels * params.texelSize;
+    vec2 prevUV = clamp(uv - mv * params.phase, vec2(0.0), vec2(1.0));
+    vec2 currUV = clamp(uv + mv * (1.0 - params.phase), vec2(0.0), vec2(1.0));
+
+    vec3 prevColor = textureLod(prevFrame, prevUV, 0.0).rgb;
+    vec3 currColor = textureLod(currFrame, currUV, 0.0).rgb;
+
+    ivec2 prevPx = ivec2(clamp(prevUV * vec2(texSize), vec2(0.0), vec2(texSize - 1)));
+    ivec2 currPx = ivec2(clamp(currUV * vec2(texSize), vec2(0.0), vec2(texSize - 1)));
+    float prevDepth = texelFetch(worldDepth, prevPx, 0).r;
+    float currDepthVal = texelFetch(worldDepth, currPx, 0).r;
+
+    bool prevValid = abs(prevDepth - centerDepth) < DEPTH_DISOCCLUSION;
+    bool currValid = abs(currDepthVal - centerDepth) < DEPTH_DISOCCLUSION;
+
+    vec3 result;
+    float maxDiff = 0.0;
+    if (prevValid && currValid) {
+        vec3 diff = abs(prevColor - currColor);
+        maxDiff = max(max(diff.r, diff.g), diff.b);
+        result = mix(prevColor, currColor, params.phase);
+    } else if (currValid) {
+        result = currColor;
+    } else if (prevValid) {
+        result = prevColor;
+    } else {
+        result = mix(prevColor, currColor, params.phase);
+    }
+
+    float motionLen = length(mvPixels);
+    float confidence = FULL_INTERPOLATION_CONFIDENCE;
+
+    float depthStability = 1.0 - min(abs(prevDepth - centerDepth) + abs(currDepthVal - centerDepth), DEPTH_DISOCCLUSION) / DEPTH_DISOCCLUSION;
+    if (depthStability > REACTIVE_DEPTH_STABILITY && maxDiff > params.disocclusionThreshold
+        && motionLen < REACTIVE_MAX_MOTION_PX) {
+        confidence *= REACTIVE_CONFIDENCE_ATTENUATION;
+    }
+    result = mix(centerColor, result, confidence);
+
+    if (any(isnan(result)) || any(isinf(result))) {
+        result = centerColor;
+    }
+    result = clamp(result, vec3(0.0), vec3(1.0));
+
+    imageStore(outputFrame, pixel, vec4(result, 1.0));
+}

@@ -1,0 +1,59 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master, dev ]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (Fabric & NeoForge)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 26
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '26'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build all loaders
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Upload Fabric artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fabric-artifact
+          path: fabric/build/libs/*.jar
+          if-no-files-found: warn
+
+      - name: Upload NeoForge artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: neoforge-artifact
+          path: neoforge/build/libs/*.jar
+          if-no-files-found: warn
+
+      - name: Upload common artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: common-artifact
+          path: common/build/libs/*.jar
+          if-no-files-found: warn

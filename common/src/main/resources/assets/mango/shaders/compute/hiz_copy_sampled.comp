@@ -1,0 +1,42 @@
+#version 460
+
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D srcDepth;
+
+layout(set = 0, binding = 1, r16f) uniform image2D dstDepth;
+
+float roundDownToHalf(float v) {
+    uint bits = packHalf2x16(vec2(v, 0.0)) & 0xFFFFu;
+    float rounded = unpackHalf2x16(bits).x;
+    if (rounded > v) {
+        rounded = unpackHalf2x16(bits - 1u).x;
+    }
+    return rounded;
+}
+
+void main() {
+    ivec2 dstCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dstSize = imageSize(dstDepth);
+    if (dstCoord.x >= dstSize.x || dstCoord.y >= dstSize.y) {
+        return;
+    }
+
+    ivec2 srcSize = textureSize(srcDepth, 0);
+    ivec2 srcBegin = dstCoord * srcSize / dstSize;
+    ivec2 srcEnd = (dstCoord + ivec2(1)) * srcSize / dstSize;
+
+    float minDepth = 1.0;
+    if (all(equal(srcEnd - srcBegin, ivec2(2)))) {
+        vec4 quad = textureGather(srcDepth, (vec2(srcBegin) + 1.0) / vec2(srcSize), 0);
+        minDepth = min(minDepth, min(min(quad.x, quad.y), min(quad.z, quad.w)));
+    } else {
+        for (int y = srcBegin.y; y < srcEnd.y; y++) {
+            for (int x = srcBegin.x; x < srcEnd.x; x++) {
+                minDepth = min(minDepth, texelFetch(srcDepth, ivec2(x, y), 0).r);
+            }
+        }
+    }
+    imageStore(dstDepth, dstCoord, vec4(roundDownToHalf(minDepth), 0.0, 0.0, 1.0));
+}
